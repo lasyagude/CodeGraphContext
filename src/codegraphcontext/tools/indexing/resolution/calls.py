@@ -1500,6 +1500,11 @@ def build_function_call_groups(
             return f"Sequence<{element_type}>"
         return f"List<{element_type}>"
 
+    # Fast path: skip all Kotlin-specific index structures when no Kotlin files present.
+    # For pure Java/Python/JS repos this avoids building extension_method_index and
+    # class_method_index over hundreds of thousands of functions.
+    has_kotlin = any(fd.get("lang") == "kotlin" for fd in all_file_data)
+
     member_return_types: Dict[Tuple[Optional[str], str], str] = {}
     member_return_types_full: Dict[Tuple[Optional[str], str], str] = {}
     member_property_types: Dict[Tuple[Optional[str], str], str] = {}
@@ -1589,21 +1594,22 @@ def build_function_call_groups(
         for func in fd.get("functions", []):
             indexed_func = {**func, "path": fd["path"], "package": package_name}
             function_index.setdefault((file_path, func["name"]), []).append(indexed_func)
-            context_names = function_context_names_for_maps(fd, func, package_name)
-            for context_name in context_names:
-                class_method_names.setdefault(context_name, set()).add(func["name"])
-                class_method_index.setdefault((context_name, func["name"]), []).append(
-                    indexed_func
+            if has_kotlin:
+                context_names = function_context_names_for_maps(fd, func, package_name)
+                for context_name in context_names:
+                    class_method_names.setdefault(context_name, set()).add(func["name"])
+                    class_method_index.setdefault((context_name, func["name"]), []).append(
+                        indexed_func
+                    )
+                receiver_types = type_keys_for_maps(
+                    func.get("receiver_type"),
+                    fd_local_imports,
+                    package_name,
                 )
-            receiver_types = type_keys_for_maps(
-                func.get("receiver_type"),
-                fd_local_imports,
-                package_name,
-            )
-            for receiver_type in receiver_types:
-                extension_method_index.setdefault((receiver_type, func["name"]), []).append(
-                    indexed_func
-                )
+                for receiver_type in receiver_types:
+                    extension_method_index.setdefault((receiver_type, func["name"]), []).append(
+                        indexed_func
+                    )
         for variable in fd.get("variables", []):
             if variable.get("context"):
                 continue
@@ -1619,25 +1625,25 @@ def build_function_call_groups(
             if package_name:
                 global_variable_types[f"{package_name}.{variable_name}"] = variable_type
 
-    needs_member_receiver_types = any(
-        call.get("receiver_base_type") and call.get("receiver_member_name")
-        for fd in all_file_data
-        for call in fd.get("function_calls", [])
-    ) or any(
-        fd.get("lang") == "kotlin" and call.get("base_obj")
-        for fd in all_file_data
-        for call in fd.get("function_calls", [])
-    ) or any(
-        variable.get("initializer_receiver_name")
-        and variable.get("initializer_member_name")
-        for fd in all_file_data
-        for variable in fd.get("variables", [])
-    ) or any(
-        variable.get("initializer_collection_receiver_name")
-        and variable.get("initializer_collection_member_name")
-        for fd in all_file_data
-        for variable in fd.get("variables", [])
-    )
+    # Single-pass check replacing 4 separate O(n) any() scans.
+    needs_member_receiver_types = False
+    if has_kotlin:
+        for fd in all_file_data:
+            is_kotlin = fd.get("lang") == "kotlin"
+            for call in fd.get("function_calls", []):
+                if (call.get("receiver_base_type") and call.get("receiver_member_name")) or \
+                   (is_kotlin and call.get("base_obj")):
+                    needs_member_receiver_types = True
+                    break
+            if needs_member_receiver_types:
+                break
+            for variable in fd.get("variables", []):
+                if (variable.get("initializer_receiver_name") and variable.get("initializer_member_name")) or \
+                   (variable.get("initializer_collection_receiver_name") and variable.get("initializer_collection_member_name")):
+                    needs_member_receiver_types = True
+                    break
+            if needs_member_receiver_types:
+                break
     if needs_member_receiver_types:
         for fd in all_file_data:
             package_name = file_package(fd)
@@ -1733,6 +1739,13 @@ def build_function_call_groups(
         caller_file_path = str(Path(file_data["path"]).resolve())
         func_names = {f["name"] for f in file_data.get("functions", [])}
         class_names = {c["name"] for c in file_data.get("classes", [])}
+        # Pre-sort functions by line range for O(log n) scope lookup via bisect.
+        _file_functions_sorted = sorted(
+            [f for f in file_data.get("functions", []) if f.get("line_number") is not None and f.get("end_line") is not None],
+            key=lambda f: f["line_number"],
+        )
+        _fn_starts = [f["line_number"] for f in _file_functions_sorted]
+        _fn_ends   = [f["end_line"]   for f in _file_functions_sorted]
         local_names = func_names | class_names
         local_class_bases = {
             c["name"]: c.get("bases", []) for c in file_data.get("classes", [])
@@ -1771,15 +1784,17 @@ def build_function_call_groups(
         ) -> Any:
             if not context_name or line_number is None:
                 return context_name
-            for function in file_data.get("functions", []):
-                if function.get("name") != context_name:
+            # Use bisect on pre-sorted intervals instead of linear scan.
+            import bisect
+            idx_r = bisect.bisect_right(_fn_starts, line_number)
+            for i in range(idx_r - 1, -1, -1):
+                fn = _file_functions_sorted[i]
+                if fn["line_number"] > line_number:
                     continue
-                start_line = function.get("line_number")
-                end_line = function.get("end_line", start_line)
-                if start_line is None or end_line is None:
-                    continue
-                if start_line <= line_number <= end_line:
-                    return function_scope(function)
+                if fn["end_line"] < line_number:
+                    break
+                if fn.get("name") == context_name:
+                    return function_scope(fn)
             return context_name
 
         def variable_scope(variable: Dict[str, Any]) -> Any:
