@@ -455,17 +455,24 @@ class GraphWriter:
         resolved_calls: List[Dict],
     ) -> None:
         batch_size = 1000
-        # Generic query matching ANY valid code element label for caller and callee
-        q_generic = """
-            UNWIND $batch AS row
-            MATCH (caller {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
-            WHERE caller:Function OR caller:Class OR caller:Interface OR caller:Trait OR caller:Struct OR caller:Enum OR caller:Record OR caller:Union
-            MATCH (called {name: row.called_name, path: row.called_file_path})
-            WHERE called:Function OR called:Class OR called:Interface OR called:Trait OR called:Struct OR called:Enum OR called:Record OR caller:Union
-            MERGE (caller)-[c:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
-            SET c.confidence = row.confidence, c.resolution_tier = row.resolution_tier,
-                c.confidence_label = row.confidence_label
-        """
+
+        # Label-specific queries — each MATCH uses a concrete label so Neo4j can
+        # exploit the label+property composite index instead of a full scan.
+        # caller_label / called_label are annotated by build_function_call_groups.
+        _VALID_LABELS = frozenset(
+            ["Function", "Class", "Interface", "Trait", "Struct", "Enum", "Record", "Union"]
+        )
+
+        def _q(caller_label: str, called_label: str) -> str:
+            return f"""
+                UNWIND $batch AS row
+                MATCH (caller:{caller_label} {{name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number}})
+                MATCH (called:{called_label} {{name: row.called_name, path: row.called_file_path}})
+                MERGE (caller)-[c:CALLS {{line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}}]->(called)
+                SET c.confidence = row.confidence, c.resolution_tier = row.resolution_tier,
+                    c.confidence_label = row.confidence_label
+            """
+
         q_file_to_any = """
             UNWIND $batch AS row
             MATCH (caller:File {path: row.caller_file_path})
@@ -479,14 +486,46 @@ class GraphWriter:
         file_calls = [c for c in resolved_calls if c["type"] == "file"]
         code_calls = [c for c in resolved_calls if c["type"] == "function"]
 
+        # Group code calls by (caller_label, called_label) for label-specific writes.
+        # C++ calls carry explicit labels; all other languages fall through to __generic__
+        # which uses the same query as before this optimization (no change for Java etc.)
+        from collections import defaultdict
+        label_groups: dict = defaultdict(list)
+        for call in code_calls:
+            cl = call.get("caller_label")  # None = non-C++ caller
+            dl = call.get("called_label")  # None = non-C++ callee
+            # Use label-specific query only when BOTH sides have a concrete label
+            # (i.e. both are C++ files). Mixed or non-C++ calls go through generic.
+            if cl and dl and cl in _VALID_LABELS and dl in _VALID_LABELS:
+                label_groups[(cl, dl)].append(call)
+            else:
+                label_groups[("__generic__", "__generic__")].append(call)
+
         with self.driver.session() as session:
-            # Write code-to-code calls
+            # Write code-to-code calls grouped by label pair
             if code_calls:
                 t0 = time.time()
-                for i in range(0, len(code_calls), batch_size):
-                    batch = code_calls[i : i + batch_size]
-                    session.run(q_generic, batch=batch)
-                info_logger(f"[CALLS] Code-to-Code: {len(code_calls)} edges written in {time.time()-t0:.1f}s")
+                total_written = 0
+                for (caller_label, called_label), group in label_groups.items():
+                    if caller_label == "__generic__":
+                        # Rare fallback: use the original label-OR query
+                        q_generic = """
+                            UNWIND $batch AS row
+                            MATCH (caller {name: row.caller_name, path: row.caller_file_path, line_number: row.caller_line_number})
+                            WHERE caller:Function OR caller:Class OR caller:Interface OR caller:Trait OR caller:Struct OR caller:Enum OR caller:Record OR caller:Union
+                            MATCH (called {name: row.called_name, path: row.called_file_path})
+                            WHERE called:Function OR called:Class OR called:Interface OR called:Trait OR called:Struct OR called:Enum OR called:Record OR called:Union
+                            MERGE (caller)-[c:CALLS {line_number: row.line_number, args: row.args, full_call_name: row.full_call_name}]->(called)
+                            SET c.confidence = row.confidence, c.resolution_tier = row.resolution_tier,
+                                c.confidence_label = row.confidence_label
+                        """
+                        query = q_generic
+                    else:
+                        query = _q(caller_label, called_label)
+                    for i in range(0, len(group), batch_size):
+                        session.run(query, batch=group[i : i + batch_size])
+                    total_written += len(group)
+                info_logger(f"[CALLS] Code-to-Code: {total_written} edges written in {time.time()-t0:.1f}s")
 
             # Write file-to-code calls
             if file_calls:
@@ -668,6 +707,32 @@ class GraphWriter:
                 )
 
     # ── Spring semantic edges (#887) ───────────────────────────────────────────
+
+    def write_cpp_class_function_links(self, repo_path_str: str) -> None:
+        """Post-pass: create Class-[:CONTAINS]->Function edges for C++ files.
+
+        C++ defines class methods out-of-line in .cpp files while the Class node
+        lives in the corresponding .h file.  The per-file write pass cannot create
+        these edges because the Class node may not exist yet when the .cpp is
+        processed.  This method runs AFTER all file nodes are in the graph and
+        resolves every Function that carries a class_context property.
+
+        Scoped strictly to C++ extensions (.cpp / .cc / .cxx / .c++ / .C) so
+        other languages are completely unaffected.
+        """
+        _cpp_exts = ('.cpp', '.cc', '.cxx', '.c++', '.C')
+        ext_conditions = ' OR '.join(f'fn.path ENDS WITH "{ext}"' for ext in _cpp_exts)
+        query = f"""
+            MATCH (fn:Function)
+            WHERE fn.path STARTS WITH $repo_path
+              AND fn.class_context IS NOT NULL
+              AND ({ext_conditions})
+            MATCH (c:Class {{name: fn.class_context}})
+            WHERE c.path STARTS WITH $repo_path
+            MERGE (c)-[:CONTAINS]->(fn)
+        """
+        with self.driver.session() as session:
+            session.run(query, repo_path=repo_path_str)
 
     def write_spring_inject_links(self, inject_batch: List[Dict[str, Any]]) -> None:
         """Create INJECTS edges: injector Class -> injected Class (via @Autowired / @Inject)."""
