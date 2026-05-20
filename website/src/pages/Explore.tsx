@@ -147,10 +147,10 @@ const Explore = () => {
           fileContents[f.path] = f.content;
         }
 
-        setProgressText("Initializing Python semantic engine...");
+        setProgressText("Initializing WebAssembly semantic engine...");
         setProgressValue(60);
         
-        const graphData = await parseFilesWithPyodide(
+        const graphData = await parseFilesIntoGraph(
           files,
           (msg, val) => {
             setProgressText(msg);
