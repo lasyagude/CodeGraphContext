@@ -814,6 +814,7 @@ const Explore = () => {
     const cleanCommit = commitSha.length === 40 && /^[0-9a-fA-F]+$/.test(commitSha) ? commitSha.substring(0, 7).toLowerCase() : commitSha.toLowerCase();
 
     const channelName = `cgc-tunnel-${cleanRepoName}-${cleanBranch}-${cleanCommit}`;
+    const globalChannelName = activeRepoPath === "playground" ? "cgc-tunnel-global-playground" : `cgc-tunnel-global-${cleanRepoName}`;
 
     console.log(`[Explore Tunnel] Booting MCP signaling conduit: ${channelName}`);
 
@@ -1048,6 +1049,7 @@ const Explore = () => {
       supabaseUrl,
       supabaseAnonKey,
       channelName,
+      globalChannelName,
       executeQueryCallback,
       getToolsCallback,
       executeToolCallback

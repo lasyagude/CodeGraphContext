@@ -87,7 +87,7 @@ export default async function handler(req: any, res: any) {
   const wasmQueries = ["definitions", "callers", "callees", "file_structure", "search", "cypher"];
   const isWasmQuery = wasmQueries.includes(query_type);
 
-  let channelName = "cgc-tunnel-global-mcp";
+  let channelName = "cgc-tunnel-global-playground";
   let cleanRepo = "";
 
   if (repo && typeof repo === "string") {
@@ -96,13 +96,19 @@ export default async function handler(req: any, res: any) {
 
   // Route queries to their specific repository channel if a repository is specified.
   // We scope it by branch and commit for 100% concurrency isolation.
-  // CRITICAL: Global tools MUST always route to the global channel to ensure backward compatibility and zero-setup capability!
-  if (cleanRepo && !isGlobalTool) {
+  // CRITICAL: Global tools route to the repo-scoped global tunnel to prevent version mismatches.
+  if (cleanRepo) {
     const cleanRepoName = cleanRepo.replace(/\//g, "_").toLowerCase();
-    const cleanBranch = branch ? String(branch).replace(/\//g, "_").toLowerCase() : "main";
-    const commitStr = commit ? String(commit) : "latest";
-    const cleanCommit = commitStr.length === 40 && /^[0-9a-fA-F]+$/.test(commitStr) ? commitStr.substring(0, 7).toLowerCase() : commitStr.toLowerCase();
-    channelName = `cgc-tunnel-${cleanRepoName}-${cleanBranch}-${cleanCommit}`;
+    if (isGlobalTool) {
+      channelName = `cgc-tunnel-global-${cleanRepoName}`;
+    } else {
+      const cleanBranch = branch ? String(branch).replace(/\//g, "_").toLowerCase() : "main";
+      const commitStr = commit ? String(commit) : "latest";
+      const cleanCommit = commitStr.length === 40 && /^[0-9a-fA-F]+$/.test(commitStr) ? commitStr.substring(0, 7).toLowerCase() : commitStr.toLowerCase();
+      channelName = `cgc-tunnel-${cleanRepoName}-${cleanBranch}-${cleanCommit}`;
+    }
+  } else {
+    channelName = "cgc-tunnel-global-playground";
   }
 
   const channel = supabase.channel(channelName);

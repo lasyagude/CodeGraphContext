@@ -258,7 +258,7 @@ export default async function handler(req: any, res: any) {
         const cleanCommit = commitStr.length === 40 && /^[0-9a-fA-F]+$/.test(commitStr) ? commitStr.substring(0, 7).toLowerCase() : commitStr.toLowerCase();
         
         const channelName = isGlobalTool 
-          ? "cgc-tunnel-global-mcp" 
+          ? (cleanRepoName ? `cgc-tunnel-global-${cleanRepoName}` : "cgc-tunnel-global-playground") 
           : `cgc-tunnel-${cleanRepoName}-${cleanBranch}-${cleanCommit}`;
         const channel = supabase.channel(channelName);
         const requestId = Math.random().toString(36).substring(2, 15);

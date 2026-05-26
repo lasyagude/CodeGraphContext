@@ -12,7 +12,6 @@ export type ToolsListCallback = () => Promise<any[]>;
 
 export type ToolCallCallback = (toolName: string, args: any) => Promise<any>;
 
-const GLOBAL_CHANNEL_NAME = "cgc-tunnel-global-mcp";
 const VISIBILITY_RECONNECT_DEBOUNCE_MS = 2000;
 
 function isChannelJoined(channel: RealtimeChannel | null): boolean {
@@ -21,6 +20,7 @@ function isChannelJoined(channel: RealtimeChannel | null): boolean {
 
 export class KuzuCoordinator {
   private channelName: string;
+  private globalChannelName: string;
   private channel: RealtimeChannel | null = null;
   private globalChannel: RealtimeChannel | null = null;
 
@@ -37,11 +37,13 @@ export class KuzuCoordinator {
     _supabaseUrl: string,
     _supabaseAnonKey: string,
     channelName: string,
+    globalChannelName: string,
     executeQueryCallback: QueryExecutionCallback,
     getToolsCallback: ToolsListCallback,
     executeToolCallback: ToolCallCallback
   ) {
     this.channelName = channelName;
+    this.globalChannelName = globalChannelName;
     this.executeQueryCallback = executeQueryCallback;
     this.getToolsCallback = getToolsCallback;
     this.executeToolCallback = executeToolCallback;
@@ -110,13 +112,13 @@ export class KuzuCoordinator {
     }
 
     if (!this.globalChannel) {
-      console.log(`[KuzuCoordinator] Subscribing to global channel: ${GLOBAL_CHANNEL_NAME}`);
-      this.globalChannel = supabase.channel(GLOBAL_CHANNEL_NAME);
-      this.setupChannelListeners(this.globalChannel, GLOBAL_CHANNEL_NAME);
+      console.log(`[KuzuCoordinator] Subscribing to global channel: ${this.globalChannelName}`);
+      this.globalChannel = supabase.channel(this.globalChannelName);
+      this.setupChannelListeners(this.globalChannel, this.globalChannelName);
       this.globalChannel.subscribe((status: string) => {
         if (status === "SUBSCRIBED") {
           console.log(
-            `[KuzuCoordinator] ✅ Subscribed to global channel: ${GLOBAL_CHANNEL_NAME}`
+            `[KuzuCoordinator] ✅ Subscribed to global channel: ${this.globalChannelName}`
           );
         }
       });
