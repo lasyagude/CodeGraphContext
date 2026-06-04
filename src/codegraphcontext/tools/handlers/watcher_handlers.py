@@ -57,11 +57,15 @@ def watch_directory(code_watcher, list_repositories_func, add_code_func, **args)
 
         # 3. Decide whether to perform an initial scan
         if is_already_indexed:
-            # If already indexed, just start the watcher without a scan
-            code_watcher.watch_directory(path_str, perform_initial_scan=False)
+            # Reconcile changes made while the watcher was stopped before live updates.
+            code_watcher.watch_directory(
+                path_str,
+                perform_initial_scan=False,
+                sync_on_start=True,
+            )
             return {
                 "success": True,
-                "message": f"Path '{path_str}' is already indexed. Now watching for live changes."
+                "message": f"Path '{path_str}' is synchronized. Now watching for live changes."
             }
         else:
             # If not indexed, perform the scan AND start the watcher

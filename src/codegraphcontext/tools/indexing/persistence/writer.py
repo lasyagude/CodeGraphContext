@@ -1480,6 +1480,16 @@ class GraphWriter:
             )
             return {r["p"] for r in result if r["p"] and r["p"] != file_path_str}
 
+    def get_repo_file_paths(self, repo_path: Path) -> set:
+        """Return every indexed File path below a repository root."""
+        prefix = str(repo_path.resolve()) + "/"
+        with self.driver.session() as session:
+            result = session.run(
+                "MATCH (f:File) WHERE f.path STARTS WITH $prefix RETURN f.path AS p",
+                prefix=prefix,
+            )
+            return {record["p"] for record in result if record["p"]}
+
     def get_inheritance_neighbor_paths(self, file_path_str: str) -> set:
         with self.driver.session() as session:
             result = session.run(
